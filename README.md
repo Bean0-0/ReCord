@@ -7,7 +7,7 @@ An experimental Vencord userplugin for **official Discord desktop on Windows**:
 - Save stereo 48 kHz WAV files locally in your system's Videos/ReCord folder.
 - Optionally include processed microphone audio while unmuted.
 
-The audio pipeline has automated tests and builds against Vencord. **The user has confirmed live capture works with automatic buffering on join.** ReCord prepares capture before Discord creates the voice stream, without forcing a reconnect. Additional device, mute-state, and long-session checks remain in the testing checklist. Browser Discord and Vesktop are not supported by this backend.
+ReCord has been tested in a live call and builds against Vencord. The capture backend supports official Discord desktop on Windows; browser Discord and Vesktop are not supported.
 
 ## Build and install
 
@@ -42,9 +42,9 @@ Open ReCord through the chat-bar recording icon, Vencord Toolbox → ReCord cont
 4. **Stop capture** saves an active recording and pauses buffering for the current call. On your next normal join, buffering starts again. Leaving or changing voice connections ends the previous session and saves an active recording. A new voice stream gets a new buffer.
 5. Use **Open recordings folder** to find the saved files. Files stay local; the plugin does not upload them.
 
-The microphone setting applies when capture starts. Let participants know before recording. The status icon indicates local capture; it does not notify other participants.
+The microphone setting applies when capture starts. Let participants know before recording: the status icon only appears in your client.
 
-## Prototype limits
+## Limits
 
 - While ReCord is enabled, each normal voice join automatically starts capture. Its startup hook prepares the file baseline and enables diagnostics before stream creation. Capture setup is limited to two seconds; a failure lets the call join normally and reports an error.
 - Capture uses Discord's internal WebRTC diagnostic dump format. Client updates may break it. If no readable audio arrives for 10 seconds, ReCord stops and reports an error.
@@ -55,4 +55,4 @@ The microphone setting applies when capture starts. Let participants know before
 - WAV is uncompressed. Long recordings split into numbered parts at 256 MiB. Headers update during recording so completed audio is usually playable after an unexpected exit; power-loss durability is not guaranteed. Hard crashes can leave diagnostic files or state behind.
 - Audio is the mixed playout stream, with optional local mic, rather than separate speaker tracks. Soundboards and screenshare audio need verification. The shortcut works while Discord is focused; global shortcuts and compressed export are future work.
 
-See [the live-test checklist](docs/TESTING.md) and [implementation research](docs/RESEARCH.md). Licensed under [GPL-3.0-or-later](LICENSE).
+See the [testing guide](docs/TESTING.md) and [capture internals](docs/RESEARCH.md). Licensed under [GPL-3.0-or-later](LICENSE).

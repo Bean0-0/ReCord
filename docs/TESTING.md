@@ -1,30 +1,28 @@
-# Validating the capture prototype
+# Testing
 
 ## Automated checks
 
-Run `npm test` and `npm run typecheck` for the portable audio pipeline. The tests use generated WebRTC protobuf fixtures and temporary files; they do not access a microphone, Discord account, or live call.
+```sh
+npm test
+npm run typecheck
+npm run setup:vencord
+npm run build
+```
 
-Coverage includes exact 30-second replay retention, early clips, snapshots during recording, incremental reads and partial records, file rotation, integer/float audio, sample-rate changes, timestamped microphone gating, malformed data, short/failed writes, segmented WAV headers, teardown after capture errors, preservation of existing diagnostics, no-audio cleanup without empty WAVs, native error formatting, Discord module-directory lookup, initial join states, canceled joins, buffer setup before writer creation, recording from an active buffer, capture setup failure, and setup timeout without blocking voice.
+The tests use generated WebRTC protobuf fixtures and temporary files. They cover replay retention, audio decoding and mixing, microphone gating, WAV writing, capture cleanup, file rotation, and voice-join handling. They do not access Discord or a microphone.
 
-`npm run setup:vencord` followed by `npm run build` checks the renderer/native integration against Vencord's types and lint rules and builds its desktop bundles. The development checkout is pinned to `383409e6a6ec9008ee8a7496500f1e75f17824d1` when created. An existing checkout is preserved.
+The Vencord build checks the renderer and native integration, runs the plugin's lint checks, and builds the desktop bundles. The development checkout is pinned to `383409e6a6ec9008ee8a7496500f1e75f17824d1` when created; an existing checkout is preserved.
 
-## Live test status
+## Live checks
 
-On November 6, 2026, the user confirmed that capture and the other functionality work after the automatic-buffering-on-join update (`2026-11-06.3`). This is a user-reported successful live test; the individual device, mute-state, rotation, and long-session scenarios below have not all been independently verified.
+Capture has been confirmed in a live call. The scenarios below provide broader coverage across devices and longer sessions. Let participants know before recording.
 
-## First live call
+1. Fully restart Discord after installing the build, enable ReCord, and join a voice call. Confirm the icon turns green, buffered seconds increase, and the call does not reconnect. Enabling ReCord during an existing call should start buffering on the next normal join.
+2. With microphone inclusion off, have another participant speak. Save an early clip and another after at least 35 seconds. Confirm the latter contains the previous 30 seconds of incoming audio at the correct speed and channel layout.
+3. Stop capture and confirm it stays paused for the call. Enable microphone inclusion and join a test call. Alternate local and remote speech, then check self mute, temporary mute or push-to-talk, hardware mute where available, server mute, and deafen. Listen for missing speech, muted microphone leakage, timing drift, and clipping.
+4. Start a recording, save clips while recording, then stop it. Confirm recording starts and stops at the requested times, clip saves do not interrupt it, and buffering continues afterward.
+5. Record through a diagnostic file rotation and an output-device change. Check continuity and WAV playback, then inspect memory and temporary disk use during a longer call.
+6. Move channels, disconnect and reconnect, disable the plugin, and reload Discord. Confirm capture stops and active recordings are finalized. A new voice stream should start with an empty buffer. Check that newly created diagnostic files are removed once released and pre-existing files are preserved.
+7. Exercise the chat-bar button, settings controls, Toolbox actions, `/record`, `/clip`, and Ctrl+Shift+S. The shortcut should fire once per press while Discord is focused. Closing the controls should leave an active recording running with the red status icon visible.
 
-The initial user test failed with another participant speaking: capture received no audio for 10 seconds, the recorder produced a zero-second WAV, and shutdown reported the timeout again. Logs confirmed the no-audio timeout but did not include capture file counts or the actual data directory.
-
-The updated prototype resolves its directory from Discord's main-process module paths, checks native capture support, creates recording files only after the first audio arrives, and preserves the original failure without a duplicate shutdown toast. The timeout now includes diagnostic counts and the scanned directory. Local inspection confirmed the failed recordings are 44-byte WAV headers with no audio payload. Discord was still running the native code loaded before the fixes were built. A capture revision handshake now blocks capture after a renderer-only reload when native code is stale, with instructions to fully quit from the system tray. The next live test loaded revision `2026-11-06.1` and still failed: no dump files, zero bytes, zero decoded frames. Static inspection of the installed native voice engine showed `setAecDump(true)` sets an enable flag, while audio stream creation starts the writer. Revision `2026-11-06.2` enables the flag and briefly reconnects the existing voice connection, allowing that initial reconnect without stopping capture. Log objects are now serialized so the backend and file counters remain readable in Discord's file logs. The user reported the visible leave/rejoin behavior of revision `2026-11-06.2`. Revision `2026-11-06.3` removes that workaround: a source patch prepares buffering immediately before `_connectMediaEngineWithEndpoint` creates the native voice stream on a normal join. The patch was verified to match once in the installed Discord JavaScript, and the modified JavaScript was compiled without executing it. Setup failures and a two-second setup timeout allow the original voice join to continue. The subsequent user test confirmed working live capture with this automatic join hook. Use a call whose participants know it is a recording test.
-
-1. Install the custom build using the README instructions, fully restart Discord, enable ReCord, and join the test call.
-2. Enable ReCord before joining. Join normally and confirm there is no extra leave/rejoin. Open ReCord controls and confirm the green icon and increasing buffer duration. Enable the plugin during an existing call separately: it should wait for the next normal join. A diagnostic/timestamp/layout error should stop capture and leave a clear message.
-3. Have another participant speak while your microphone inclusion is off. Save an early clip, then a clip after at least 35 seconds. Play the files and confirm the latter contains the previous 30 seconds of incoming audio with correct speed and channels.
-4. Stop capture and confirm it stays paused for that call. Enable microphone inclusion and join a test call normally, then alternate local/remote speech. Test self mute, temporary mute/push-to-talk, hardware mute where available, server mute, and deafen. Listen for missing speech, muted microphone leakage, timing drift, and clipping. Inclusion off should exclude your microphone from the exported mix.
-5. Start a recording from the automatic buffer, save several clips during it, then stop recording. Confirm none of those controls restarts the voice connection. Confirm the recording starts at Start, continues across clip saves, and ends at Stop; replay buffering should still be active afterward.
-6. Record through a diagnostic file rotation (at least two minutes) and an output-device change. Confirm continuous audio and valid WAV output. Inspect memory and temporary disk growth during a longer call.
-7. Test moving channels, disconnecting/reconnecting, disabling the plugin, and reloading Discord. Capture should stop and finalize the recording; a new voice stream should start buffering automatically with an empty replay buffer. Canceled or failed joins must not create a stale stream later. An unavailable capture helper or slow setup must still allow the voice call to join. Confirm newly created diagnostic files are removed once released and pre-existing files are preserved.
-8. Test the chat-bar button, settings controls, Toolbox actions, `/record`, `/clip`, and Ctrl+Shift+S. The shortcut should fire once per press while Discord is focused. Closing the controls should not stop an active recording; the red status icon should remain.
-
-Record the Discord version, Vencord revision, audio subsystem, device layout, and exact error text for failures. Do not attach raw diagnostic dumps without inspecting their contents: they can include microphone audio and metadata.
+For failures, record the Discord version, Vencord revision, audio subsystem, device layout, and exact error text. Diagnostic dumps can contain microphone audio and metadata.
