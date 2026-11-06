@@ -1,23 +1,52 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { BYTES_PER_SECOND, FRAME_BYTES } from "../plugin/audio";
 import { CaptureSession } from "../plugin/capture";
+import { type AudioPacket, type AudioSource, PacketDecoder } from "../plugin/loopback";
 import { WavRecording, writeAll } from "../plugin/recording";
 import type { FileHandle } from "node:fs/promises";
-import { frames, init } from "./fixtures";
+import { pcmFrames } from "./fixtures";
+
+class FakeSource implements AudioSource {
+    private packet: ((packet: AudioPacket) => void) | undefined;
+    private error: ((error: Error) => void) | undefined;
+    stopped = false;
+    async start(onPacket: (packet: AudioPacket) => void, onError: (error: Error) => void) { this.packet = onPacket; this.error = onError; }
+    async stop() { this.stopped = true; }
+    emit(kind: AudioPacket["kind"], time: number, pcm: Buffer) { this.packet?.({ kind, time, pcm }); }
+    fail(error: Error) { this.error?.(error); }
+}
 
 async function workspace(t: { after: (fn: () => Promise<void>) => void; }) {
     const root = await mkdtemp(join(tmpdir(), "record-test-"));
     t.after(() => rm(root, { recursive: true, force: true }));
-    const dumps = join(root, "dumps");
-    const output = join(root, "output");
-    await mkdir(dumps);
-    return { dumps, output };
+    return { root, output: join(root, "output") };
 }
+
+function packet(kind: number, time: number, pcm: Buffer) {
+    const header = Buffer.alloc(16);
+    header.writeUInt32LE(pcm.length, 0);
+    header.writeUInt32LE(kind, 4);
+    header.writeBigInt64LE(BigInt(time), 8);
+    return Buffer.concat([header, pcm]);
+}
+
+test("capture packets decode correctly across arbitrary pipe boundaries", () => {
+    const decoder = new PacketDecoder();
+    const output: AudioPacket[] = [];
+    const input = Buffer.concat([packet(0, 1234, pcmFrames(1, 1000)), packet(1, 1244, pcmFrames(2, 200))]);
+    for (const byte of input) decoder.push(Buffer.from([byte]), value => output.push(value));
+    assert.deepEqual(output.map(p => [p.kind, p.time, p.pcm.length, p.pcm.readInt16LE(0)]), [
+        ["playout", 1234, FRAME_BYTES, 1000], ["mic", 1244, FRAME_BYTES * 2, 200]
+    ]);
+    const bad = Buffer.alloc(16);
+    bad.writeUInt32LE(400_000);
+    assert.throws(() => new PacketDecoder().push(bad, () => { }), /Invalid audio capture packet/);
+});
 
 test("WAV writer streams segments with valid recoverable headers", async t => {
     const { output } = await workspace(t);
@@ -29,14 +58,14 @@ test("WAV writer streams segments with valid recoverable headers", async t => {
     for (const name of active) {
         const file = await readFile(join(output, name));
         assert.equal(file.toString("ascii", 0, 4), "RIFF");
-        assert.equal(file.readUInt32LE(40), file.length - 44, "header updates before close");
+        assert.equal(file.readUInt32LE(40), file.length - 44);
     }
     const result = await writer.close();
     assert.equal(result.seconds, 0.08);
     assert.equal(result.segments, 3);
 });
 
-test("writer retries short writes and surfaces stalled/disk-full writes", async () => {
+test("writer retries short writes and surfaces stalled or failed writes", async () => {
     const written = Buffer.alloc(10);
     const fake = { write: async (data: Buffer, offset: number, length: number, position: number) => {
         const bytesWritten = Math.min(3, length);
@@ -49,97 +78,148 @@ test("writer retries short writes and surfaces stalled/disk-full writes", async 
     await assert.rejects(writeAll({ write: async () => { throw new Error("ENOSPC"); } } as unknown as FileHandle, Buffer.alloc(1), 0), /ENOSPC/);
 });
 
-test("capture tails partial records, clips while recording, and preserves pre-existing diagnostics", async t => {
-    const { dumps, output } = await workspace(t);
-    const old = join(dumps, "aecdump0");
-    await writeFile(old, "unrelated diagnostic data");
-    const now = Math.floor(Date.now() / 10) * 10;
-    const capture = new CaptureSession(dumps, output, false, true, now);
+test("buffering writes no audio files until saving; clips and recordings share the live stream", async t => {
+    const { root, output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, false, false, now);
     await capture.prepare();
-    const path = join(dumps, "aecdump1");
-    const first = Buffer.concat([init(now), frames(100, 1000)]);
-    await writeFile(path, first.subarray(0, first.length - 5));
-    await capture.poll();
-    const clip = await capture.saveClip();
-    assert.ok(clip.seconds > 0 && clip.seconds < 1);
-    await appendFile(path, first.subarray(first.length - 5));
-    await capture.poll();
+    source.emit("playout", now, pcmFrames(100, 1000));
+    await capture.poll(now + 1000);
+    assert.ok(capture.status.bufferedSeconds > 0);
+    assert.equal(capture.status.receivingAudio, true);
+    assert.deepEqual(await readdir(root), [], "the replay buffer must not create files");
     await capture.startRecording();
-    await appendFile(path, frames(100, 2000));
-    await capture.poll();
-    const during = await capture.saveClip();
-    assert.ok(during.seconds > clip.seconds);
+    assert.deepEqual(await readdir(output), [], "arming a recording must not create an empty file");
+    source.emit("playout", now + 1000, pcmFrames(100, 2000));
+    await capture.poll(now + 2000);
+    const clip = await capture.saveClip();
+    assert.ok(clip.seconds > 1);
     const recording = await capture.stopRecording();
     assert.equal(recording.seconds, 1);
     const saved = await readFile(recording.path);
     assert.equal(saved.readUInt32LE(40), BYTES_PER_SECOND);
-    assert.equal(saved.readInt16LE(44), 2000, "recording excludes pre-start replay audio");
+    assert.equal(saved.readInt16LE(44), 2000);
     await capture.end();
-    assert.equal(await readFile(old, "utf8"), "unrelated diagnostic data");
-    assert.deepEqual(await readdir(dumps), ["aecdump0"]);
+    assert.equal(source.stopped, true);
 });
 
-test("capture handles dump rotation and retains only 30 seconds in replay", async t => {
-    const { dumps, output } = await workspace(t);
-    const now = Math.floor(Date.now() / 10) * 10 - 40_000;
-    const capture = new CaptureSession(dumps, output, false, false, now);
+test("selected microphone audio is mixed only when Discord permits it", async t => {
+    const { output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, true, true, now);
     await capture.prepare();
-    for (let part = 0; part < 4; part++) {
-        await writeFile(join(dumps, `aecdump${part}`), Buffer.concat([init(now + part * 10_000), frames(1000, 1000 + part)]));
-        await capture.poll();
-    }
-    assert.equal(capture.status.bufferedSeconds, 30);
+    capture.setMicAllowed(now + 300, false);
+    capture.setMicAllowed(now + 700, true);
+    source.emit("playout", now, pcmFrames(100, 1000));
+    source.emit("mic", now, pcmFrames(100, 100));
+    await capture.poll(now + 1000);
+    await capture.poll(now + 1800);
     const clip = await capture.saveClip();
-    assert.equal(clip.seconds, 30);
-    const audio = (await readFile(clip.path)).subarray(44);
-    assert.equal(audio.length, 30 * BYTES_PER_SECOND);
-    assert.equal(audio.readInt16LE(audio.length - 2), 1003);
+    const samples = (await readFile(clip.path)).subarray(44);
+    assert.deepEqual([25, 35, 75].map(i => samples.readInt16LE(i * FRAME_BYTES)), [1100, 1000, 1100]);
     await capture.end();
 });
 
-test("unsupported capture fails clearly and closes recordings on teardown", async t => {
-    const { dumps, output } = await workspace(t);
-    const capture = new CaptureSession(dumps, output, false, false);
+test("silence advances the in-memory buffer without writing files", async t => {
+    const { root, output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const capture = new CaptureSession(new FakeSource(), output, false, false, now);
     await capture.prepare();
-    await capture.startRecording();
-    await writeFile(join(dumps, "aecdump2"), Buffer.from([255, 255, 255, 255]));
-    await assert.rejects(capture.poll(), /record size/);
-    const stopped = await capture.end();
-    assert.match(stopped!.captureError!, /record size/);
-    assert.equal(stopped!.recording!.seconds, 0);
-    assert.deepEqual(await readdir(output), [], "a failed empty capture must not leave a zero-second WAV");
-    assert.deepEqual(await readdir(dumps), []);
-});
-
-test("a no-audio timeout is reported once; teardown still succeeds without an empty WAV", async t => {
-    const { dumps, output } = await workspace(t);
-    const now = Date.now();
-    const capture = new CaptureSession(dumps, output, false, false, now);
-    await capture.prepare();
-    await capture.startRecording();
-    assert.deepEqual(await readdir(output), []);
-    await assert.rejects(capture.poll(now + 10_001), /No call audio received[\s\S]*Dump files: 0/);
-    const result = await capture.end();
-    assert.match(result!.captureError!, /No call audio received/);
-    assert.equal(result!.recording!.path, "");
-    assert.deepEqual(await readdir(output), []);
+    await capture.poll(now + 11_000);
+    assert.ok(capture.status.bufferedSeconds >= 9);
+    assert.equal(capture.status.receivingAudio, false, "silence padding must not imply Discord audio was received");
+    assert.deepEqual(await readdir(root), []);
     await capture.end();
 });
 
-test("stop finalizes already captured audio after a later capture failure", async t => {
-    const { dumps, output } = await workspace(t);
-    const now = Math.floor(Date.now() / 10) * 10;
-    const capture = new CaptureSession(dumps, output, false, true, now);
+test("source failures finalize audio already recorded", async t => {
+    const { output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, false, true, now);
     await capture.prepare();
     await capture.startRecording();
-    const path = join(dumps, "aecdump3");
-    await writeFile(path, Buffer.concat([init(now), frames(100, 1200)]));
-    await capture.poll();
-    await appendFile(path, Buffer.from([255, 255, 255, 255]));
-    await assert.rejects(capture.poll(), /record size/);
+    source.emit("playout", now, pcmFrames(100, 1200));
+    await capture.poll(now + 1000);
+    source.fail(new Error("audio device failed"));
+    await assert.rejects(capture.poll(now + 1010), /audio device failed/);
     const result = await capture.end();
     assert.equal(result!.recording!.seconds, 1);
     const file = await readFile(result!.recording!.path);
     assert.equal(file.readUInt32LE(40), BYTES_PER_SECOND);
     assert.equal(file.readInt16LE(44), 1200);
+});
+
+test("microphone mute transitions are applied before queued audio is saved", async t => {
+    const { output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, true, true, now);
+    await capture.prepare();
+    source.emit("playout", now, pcmFrames(40, 1000));
+    source.emit("mic", now, pcmFrames(40, 100));
+    await capture.poll(now + 400);
+    capture.setMicAllowed(now + 400, false);
+    source.emit("playout", now + 400, pcmFrames(60, 1000));
+    source.emit("mic", now + 400, pcmFrames(60, 100));
+    await capture.poll(now + 1000);
+    await capture.poll(now + 1800);
+    const clip = await capture.saveClip();
+    const audio = (await readFile(clip.path)).subarray(44);
+    assert.equal(audio.readInt16LE(35 * FRAME_BYTES), 1100);
+    assert.equal(audio.readInt16LE(45 * FRAME_BYTES), 1000);
+    await capture.end();
+});
+
+test("capture stops on bounded-queue overflow and large clock jumps", async t => {
+    const { output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, false, false, now);
+    await capture.prepare();
+    for (let i = 0; i < 23; i++) source.emit("playout", now + i * 1000, pcmFrames(100, 1));
+    await assert.rejects(capture.poll(now), /fell behind/);
+    assert.equal(source.stopped, true);
+    await capture.end();
+    const clockCapture = new CaptureSession(new FakeSource(), output, false, false, now);
+    await clockCapture.prepare();
+    await assert.rejects(clockCapture.poll(now + 32_000), /timeline jumped/);
+    await clockCapture.end();
+});
+
+test("a long capture retains only the latest 30 seconds in memory", async t => {
+    const { root, output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, false, false, now);
+    await capture.prepare();
+    for (let part = 0; part < 4; part++) {
+        source.emit("playout", now + part * 10_000, pcmFrames(1000, 1000 + part * 1000));
+        await capture.poll(now + (part + 1) * 10_000);
+    }
+    assert.equal(capture.status.bufferedSeconds, 30);
+    assert.deepEqual(await readdir(root), []);
+    const clip = await capture.saveClip();
+    const audio = (await readFile(clip.path)).subarray(44);
+    assert.equal(audio.length, 30 * BYTES_PER_SECOND);
+    assert.equal(audio.readInt16LE(0), 1000);
+    assert.equal(audio.readInt16LE(audio.length - 2), 4000);
+    await capture.end();
+});
+
+test("a backlog mixes timestamped microphone and playout packets in order", async t => {
+    const { output } = await workspace(t);
+    const now = Math.ceil(Date.now() / 10) * 10;
+    const source = new FakeSource();
+    const capture = new CaptureSession(source, output, true, true, now);
+    await capture.prepare();
+    source.emit("playout", now, pcmFrames(300, 1000));
+    source.emit("mic", now, pcmFrames(300, 100));
+    await capture.poll(now + 4000);
+    const clip = await capture.saveClip();
+    const audio = (await readFile(clip.path)).subarray(44);
+    assert.deepEqual([20, 150, 250].map(i => audio.readInt16LE(i * FRAME_BYTES)), [1100, 1100, 1100]);
+    await capture.end();
 });

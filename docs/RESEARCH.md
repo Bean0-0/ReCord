@@ -1,25 +1,25 @@
 # Capture internals
 
-ReCord is a Vencord userplugin for official Discord desktop. Its renderer integrates with Discord's voice state and controls; its native helpers read diagnostic files and write recordings. Vencord bundles the plugin from `src/userplugins/reCord.discordDesktop/`.
+ReCord is a Vencord userplugin for official Discord desktop on Windows. The renderer follows Discord's voice and mute state, and native helpers manage capture and recording. Vencord bundles the plugin from `src/userplugins/reCord.discordDesktop/`.
 
-## Starting capture
+## Audio capture
 
-Discord's native voice engine can write WebRTC echo-cancellation diagnostic dumps. ReCord enables this through the `MEDIA_ENGINE_SET_AEC_DUMP` action and reads the resulting files from Discord's `discord_voice` module data directory.
+A small Windows helper uses WASAPI process loopback to capture output from the Discord main process and its child processes. The optional microphone input uses a separate WASAPI capture client for the selected input device. Both streams are sent as timestamped 48 kHz stereo PCM packets over a pipe to the Vencord main process. ReCord does not enable diagnostic dumps or create temporary audio files. If Discord diagnostic recording is already active, ReCord stops or prevents its own capture and offers a control to turn diagnostics off.
 
-In the inspected Discord 1.0.9267 voice module, enabling `setAecDump` sets a flag, and the dump writer starts when the voice stream is created. ReCord patches `_connectMediaEngineWithEndpoint` to prepare its file baseline and enable diagnostics before that stream is created. This allows buffering to start on a normal voice join. Setup has a two-second timeout; if it fails, the voice connection continues and ReCord reports the error. The patch and diagnostic format are internal Discord interfaces and may change with client updates.
+When microphone inclusion is enabled, ReCord captures the selected input directly. It does not receive Discord's processed microphone stream. Discord's mute and deafen state is used to gate microphone samples in the saved mix; a microphone device change stops capture so the old device is not recorded accidentally.
 
-## Audio pipeline
+ReCord prepares capture before Discord creates the voice stream. A two-second setup timeout lets the voice connection continue if capture fails. Capture also stops when the voice connection changes or the plugin is disabled. Process loopback requires Windows 10 build 20348 or later.
 
-The native helper reads new `aecdump<N>` files incrementally. A decoder handles partial WebRTC protobuf records and converts supported input layouts and sample rates to stereo 48 kHz PCM. The decoded playout stream feeds a 30-second memory buffer and, while recording, a streaming WAV writer. Clip saves snapshot the buffer without stopping the recording.
+## Buffer and recordings
 
-Microphone inclusion is optional and uses processed microphone output. Discord's mute and deafen state gates that output in the saved mix. Temporary diagnostic files can still contain microphone input when microphone inclusion is disabled, so they should be treated as sensitive audio data.
+Incoming packets are aligned and mixed into stereo 48 kHz PCM. A bounded ring keeps the latest 30 seconds in memory; saving a clip snapshots it to WAV. Full recordings use the same stream and write WAV segments while recording is active. The packet queue is bounded so a stalled consumer cannot grow without limit.
 
-ReCord ignores diagnostic files that existed before its capture session, removes files it observed being created, and retries cleanup when files are locked. It stops capture if its observed temporary files exceed 128 MiB. An existing Discord diagnostic capture must be stopped before ReCord starts.
+ReCord does not write buffered audio to disk until a clip is saved or a full recording is started. Windows may page process memory to disk according to its system settings.
 
 ## References
 
+- [Windows application loopback capture](https://learn.microsoft.com/windows/win32/coreaudio/application-loopback-api-capture-sample).
 - [Vencord plugin setup](https://docs.vencord.dev/plugins/), [plugin API](https://docs.vencord.dev/plugins/common/), [native helpers](https://docs.vencord.dev/plugins/native/), and [patches](https://docs.vencord.dev/plugins/patches/).
 - [Vencord custom plugin installation](https://docs.vencord.dev/installing/custom-plugins/) and [platform filtering](https://github.com/Vendicated/Vencord/blob/383409e6a6ec9008ee8a7496500f1e75f17824d1/scripts/build/common.mjs#L176).
-- [VcRewind](https://github.com/fizzexual/VcRewind), a reference for diagnostic capture: [capture lifecycle](https://github.com/fizzexual/VcRewind/blob/a9b6aeaf1e21e730d6cba2e646a6398cd73968ae/index.tsx), [native helpers](https://github.com/fizzexual/VcRewind/blob/a9b6aeaf1e21e730d6cba2e646a6398cd73968ae/native.ts), [dump parser](https://github.com/fizzexual/VcRewind/blob/a9b6aeaf1e21e730d6cba2e646a6398cd73968ae/dump.ts), and [encoding](https://github.com/fizzexual/VcRewind/blob/a9b6aeaf1e21e730d6cba2e646a6398cd73968ae/ogg.ts).
 
-The Vencord development checkout is pinned to `383409e6a6ec9008ee8a7496500f1e75f17824d1`. VcRewind is licensed under GPL-3.0-or-later.
+The Vencord development checkout is pinned to `383409e6a6ec9008ee8a7496500f1e75f17824d1`.

@@ -23,8 +23,8 @@ type Status = Awaited<ReturnType<typeof Native.poll>>;
 type VoiceConnection = { context?: string; channelId?: string; };
 
 let token: string | undefined;
-let ownsDump = false;
 let captureConnection: CaptureConnection | undefined;
+let activeMicDevice: string | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let enabled = false;
 let polling = false;
@@ -63,20 +63,13 @@ function micAllowed() {
         && !MediaEngineStore.isHardwareMute() && !MediaEngineStore.isSelfMutedTemporarily() && !MediaEngineStore.isDeaf();
 }
 
-function disableDump() {
-    if (ownsDump) {
-        FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: false });
-        ownsDump = false;
-    }
-}
-
 async function endCapture() {
     clearInterval(timer);
     timer = undefined;
-    disableDump();
     const id = token;
     token = undefined;
     captureConnection = undefined;
+    activeMicDevice = undefined;
     try {
         if (id) return await Native.stopCapture(id);
     } finally {
@@ -106,20 +99,20 @@ async function beginCapture(rtc: VoiceConnection, signal: AbortSignal) {
     if (token) return;
     await checkNativeVersion(Native);
     if (signal.aborted) return;
-    if (!MediaEngineStore.isAecDumpSupported()) throw new Error("Discord's active voice engine does not support diagnostic audio capture. ReCord cannot record with this voice backend.");
-    if (MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics are already enabled. Stop the existing diagnostic capture first.");
-    if (typeof MediaEngineStore.getMediaEngine()?.setAecDump !== "function") throw new Error("This Discord client does not support native audio capture");
+    if (MediaEngineStore.getAecDump()) throw new Error("Discord diagnostic recording is active and can write audio to disk. Stop it in ReCord controls before buffering.");
     const currentChannel = rtc.channelId;
     if (!currentChannel || RTCConnectionStore.getRTCConnection() !== rtc) return;
-    const id = await Native.startCapture(settings.store.includeMic, micAllowed());
-    console.info("[ReCord] Preparing buffer before voice stream", JSON.stringify({ revision: CAPTURE_REVISION, aecSupported: MediaEngineStore.isAecDumpSupported(), audioSubsystem: MediaEngineStore.getAudioSubsystem() }));
+    const { includeMic } = settings.store;
+    const microphoneId = includeMic ? MediaEngineStore.getInputDeviceId() || "default" : "";
+    const id = await Native.startCapture(includeMic, micAllowed(), microphoneId);
+    console.info("[ReCord] Preparing RAM buffer before voice stream", JSON.stringify({ revision: CAPTURE_REVISION, audioSubsystem: MediaEngineStore.getAudioSubsystem() }));
     token = id;
     try {
         if (signal.aborted || !shouldPrepareCapture(rtc) || RTCConnectionStore.getRTCConnection() !== rtc || RTCConnectionStore.getChannelId() !== currentChannel)
             throw new Error("Voice connection changed while preparing capture");
+        if (MediaEngineStore.getAecDump()) throw new Error("Discord diagnostic recording is active and can write audio to disk. Stop it in ReCord controls before buffering.");
         captureConnection = new CaptureConnection(currentChannel);
-        ownsDump = true;
-        FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: true });
+        activeMicDevice = includeMic ? microphoneId : undefined;
         status = await Native.poll(id);
         if (signal.aborted) {
             await endCapture();
@@ -141,7 +134,6 @@ function pollCapture() {
     void enqueue(async () => {
         if (!token) return;
         try {
-            if (!MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics were turned off");
             status = await Native.poll(token);
             if (!status.receivingAudio && !waitingLogged) {
                 console.info("[ReCord] Waiting for audio", JSON.stringify(status.diagnostics));
@@ -216,7 +208,30 @@ function connectionChanged() {
 
 function microphoneChanged() {
     const id = token;
-    if (id) void Native.setMicAllowed(id, Date.now(), micAllowed()).catch(report);
+    if (!id) { refresh(); return; }
+    const diagnosticsActive = MediaEngineStore.getAecDump();
+    const changed = activeMicDevice !== undefined && !captureConnection?.connecting
+        && (MediaEngineStore.getInputDeviceId() || "default") !== activeMicDevice;
+    void Native.setMicAllowed(id, Date.now(), changed || diagnosticsActive ? false : micAllowed()).catch(report);
+    if (changed || diagnosticsActive) {
+        void enqueue(async () => {
+            if (token !== id) return;
+            const result = await endCapture();
+            if (result?.recording?.seconds) notify("Recording saved; buffering stopped.");
+            report(new Error(diagnosticsActive
+                ? "Discord diagnostic recording is active and can write audio to disk. Stop it in ReCord controls before buffering."
+                : "Microphone changed. Join the call again to buffer with the new device."));
+        }).catch(report);
+    }
+}
+
+function stopDiagnosticRecording() {
+    action(async () => {
+        FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: false });
+        errorText = "";
+        notify("Discord diagnostic recording stopped. Buffering starts on your next voice join.");
+        refresh();
+    });
 }
 
 function onKeyDown(event: KeyboardEvent) {
@@ -227,7 +242,6 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 function unload() {
-    disableDump();
     if (token) void Native.stopCapture(token).catch(console.error);
 }
 
@@ -286,16 +300,18 @@ function Controls() {
                 </Button>
                 <Button disabled={busy || !token} variant="secondary" onClick={stopBuffering}>Stop capture</Button>
                 <Button variant="secondary" onClick={() => { void Native.openOutputFolder().catch(report); }}>Open recordings folder</Button>
+                {MediaEngineStore.getAecDump() && <Button disabled={busy || !enabled} variant="secondary" onClick={stopDiagnosticRecording}>Stop Discord diagnostic recording</Button>}
             </div>
+            {MediaEngineStore.getAecDump() && <Paragraph>Discord diagnostic recording is active and can write audio to disk.</Paragraph>}
             {errorText && <Paragraph className="record-error" role="alert">{errorText}</Paragraph>}
-            {status && !status.receivingAudio && <Paragraph>Waiting for Discord audio in {status.diagnostics.dumpDirectory}</Paragraph>}
+            {status && !status.receivingAudio && <Paragraph>Waiting for Discord audio.</Paragraph>}
             <Paragraph>
                 ReCord buffers automatically when you join a voice call. Enable it before joining. Recording uses the active buffer without reconnecting voice.
                 Stop capture pauses this call; buffering resumes on your next join. Clips and recordings save as WAV in Videos/ReCord.
                 Ctrl+Shift+S saves a clip while Discord is focused.
             </Paragraph>
             <Paragraph>
-                Let participants know before recording. Discord diagnostic files may temporarily contain your microphone even when it is excluded from saved audio.
+                Let participants know before recording. The microphone option captures the selected input directly, so Discord's voice processing is not applied.
             </Paragraph>
         </div>
     );
@@ -338,10 +354,8 @@ export default definePlugin({
         void enqueue(async () => {
             await checkNativeVersion(Native);
             console.info("[ReCord] Capture revision", CAPTURE_REVISION);
-            if (await Native.recover()) {
-                ownsDump = true;
-                disableDump();
-            }
+            await Native.recover();
+            if (MediaEngineStore.getAecDump()) report(new Error("Discord diagnostic recording is active and can write audio to disk. Stop it in ReCord controls before buffering."));
             refresh();
         }).catch(report);
     },
@@ -353,7 +367,6 @@ export default definePlugin({
         window.removeEventListener("keydown", onKeyDown);
         window.removeEventListener("beforeunload", unload);
         clearInterval(timer);
-        disableDump();
         void enqueue(endCapture).catch(report);
         refresh();
     }

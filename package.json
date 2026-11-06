@@ -7,6 +7,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "tsx --test tests/*.test.ts",
+    "test:loopback": "tsx scripts/test-loopback.ts",
     "typecheck": "tsc --noEmit",
     "install-plugin": "node scripts/install-plugin.mjs",
     "setup:vencord": "node scripts/setup-vencord.mjs",

@@ -6,20 +6,20 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { release } from "node:os";
 import { join } from "node:path";
 
 import { app, type IpcMainInvokeEvent, shell } from "electron";
 
 import { CaptureSession } from "./capture";
 import { CAPTURE_REVISION } from "./compatibility";
-import { voiceDumpDirectory } from "./paths";
+import { LoopbackSource } from "./loopback";
 
 let session: CaptureSession | undefined;
 let owner: number | undefined;
 let token = "";
 let lastPoll = 0;
 let queue = Promise.resolve();
-const retired = new Set<CaptureSession>();
 
 const outputDirectory = () => join(app.getPath("videos"), "ReCord");
 
@@ -37,24 +37,12 @@ function owned(event: IpcMainInvokeEvent, id: string) {
 async function closeSession() {
     const current = session;
     session = undefined;
-    try {
-        return await current?.end();
-    } finally {
-        if (current?.hasTemporaryFiles) retired.add(current);
-    }
+    return current?.end();
 }
 
-async function cleanupRetired() {
-    for (const current of retired) {
-        await current.cleanup();
-        if (!current.hasTemporaryFiles) retired.delete(current);
-    }
-}
-
-// If the renderer stops polling, finalize the WAV instead of leaving the writer open.
+// Close the capture process and finalize an active recording if the renderer stops polling.
 const watchdog = setInterval(() => {
     if (session && Date.now() - lastPoll > 5000) void serialize(closeSession).catch(console.error);
-    if (retired.size) void serialize(cleanupRetired).catch(console.error);
 }, 1000);
 watchdog.unref();
 
@@ -65,25 +53,23 @@ export function getCaptureRevision(_event: IpcMainInvokeEvent) {
 export function recover(event: IpcMainInvokeEvent) {
     return serialize(async () => {
         if (owner !== event.sender.id) return false;
-        try {
-            await closeSession();
-        } finally {
-            owner = undefined;
-            token = "";
-        }
+        try { await closeSession(); }
+        finally { owner = undefined; token = ""; }
         return true;
     });
 }
 
-export function startCapture(event: IpcMainInvokeEvent, includeMic: boolean, micAllowed: boolean) {
+export function startCapture(event: IpcMainInvokeEvent, includeMic: boolean, micAllowed: boolean, microphoneId: string) {
     return serialize(async () => {
         if (session || owner !== undefined) throw new Error("Another ReCord capture session is active");
-        await cleanupRetired();
-        if (retired.size) throw new Error("Previous temporary audio files are still in use. Wait before starting capture again.");
-        if (typeof includeMic !== "boolean" || typeof micAllowed !== "boolean") throw new Error("Invalid capture options");
-        const discordPaths = globalThis as typeof globalThis & { moduleDataPath?: string; modulePath?: string; };
-        const next = new CaptureSession(voiceDumpDirectory(app.getPath("userData"), discordPaths), outputDirectory(), includeMic, micAllowed);
-        await next.prepare();
+        if (typeof includeMic !== "boolean" || typeof micAllowed !== "boolean" || typeof microphoneId !== "string" || microphoneId.length > 512 || microphoneId.includes("\0"))
+            throw new Error("Invalid capture options");
+        if (process.platform !== "win32" || Number(release().split(".")[2]) < 20348)
+            throw new Error("RAM-only capture requires Windows 10 build 20348 or later.");
+        const source = new LoopbackSource(join(__dirname, "ReCordCapture.exe"), process.pid, includeMic ? microphoneId : undefined);
+        const next = new CaptureSession(source, outputDirectory(), includeMic, micAllowed);
+        try { await next.prepare(); }
+        catch (error) { await source.stop(); throw error; }
         session = next;
         owner = event.sender.id;
         token = randomUUID();
@@ -124,21 +110,14 @@ export function startRecording(event: IpcMainInvokeEvent, id: string) {
 }
 
 export function stopRecording(event: IpcMainInvokeEvent, id: string) {
-    return serialize(async () => {
-        const current = owned(event, id);
-        return current.stopRecording();
-    });
+    return serialize(async () => owned(event, id).stopRecording());
 }
 
 export function stopCapture(event: IpcMainInvokeEvent, id: string) {
     return serialize(async () => {
         if (owner !== event.sender.id || id !== token) throw new Error("Invalid capture owner");
-        try {
-            return await closeSession();
-        } finally {
-            owner = undefined;
-            token = "";
-        }
+        try { return await closeSession(); }
+        finally { owner = undefined; token = ""; }
     });
 }
 

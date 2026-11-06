@@ -5,13 +5,13 @@ An experimental Vencord userplugin for **official Discord desktop on Windows**:
 - Automatically buffer call audio when you join, then save the last 30 seconds on demand.
 - Start and stop full recordings independently of the replay buffer.
 - Save stereo 48 kHz WAV files locally in your system's Videos/ReCord folder.
-- Optionally include processed microphone audio while unmuted.
+- Optionally include the selected microphone while unmuted.
 
-ReCord has been tested in a live call and builds against Vencord. The capture backend supports official Discord desktop on Windows; browser Discord and Vesktop are not supported.
+ReCord captures Discord audio into a 30-second RAM buffer. Clips and recordings are saved as WAV files when requested. The capture backend supports official Discord desktop on Windows; browser Discord and Vesktop are not supported.
 
 ## Build and install
 
-Requires Git, Node.js 22 or later, and npm. From this repository:
+Requires 64-bit Windows 10 build 20348 or later, Git, Node.js 22 or later, npm, and Visual Studio or Build Tools with the **Desktop development with C++** workload and Windows SDK. From this repository:
 
 ```sh
 npm ci
@@ -20,7 +20,7 @@ npm run setup:vencord
 npm run build
 ```
 
-Setup prepares an ignored `.dev/vencord` source checkout at the inspected revision, installs its declared pnpm version through npm, and copies `plugin/` into `src/userplugins/reCord.discordDesktop`. Build runs Vencord's TypeScript check, lints ReCord, and builds the development bundles. It does not change your Discord installation.
+Setup prepares an ignored `.dev/vencord` source checkout at the inspected revision, installs its declared pnpm version through npm, and copies `plugin/` into `src/userplugins/reCord.discordDesktop`. Build compiles the Windows capture helper, checks and lints ReCord, and builds the Vencord development bundles. It does not change your Discord installation.
 
 To install the resulting custom build, run the Vencord installer and select your Discord installation:
 
@@ -42,17 +42,16 @@ Open ReCord through the chat-bar recording icon, Vencord Toolbox → ReCord cont
 4. **Stop capture** saves an active recording and pauses buffering for the current call. On your next normal join, buffering starts again. Leaving or changing voice connections ends the previous session and saves an active recording. A new voice stream gets a new buffer.
 5. Use **Open recordings folder** to find the saved files. Files stay local; the plugin does not upload them.
 
-The microphone setting applies when capture starts. Let participants know before recording: the status icon only appears in your client.
+The microphone setting applies when capture starts. It records the selected input device directly, so Discord's noise suppression and other voice processing are not applied. Mute and deafen state are applied to the saved mix. Let participants know before recording: the status icon only appears in your client.
 
 ## Limits
 
-- While ReCord is enabled, each normal voice join automatically starts capture. Its startup hook prepares the file baseline and enables diagnostics before stream creation. Capture setup is limited to two seconds; a failure lets the call join normally and reports an error.
-- Capture uses Discord's internal WebRTC diagnostic dump format. Client updates may break it. If no readable audio arrives for 10 seconds, ReCord stops and reports an error.
-- ReCord checks that its recording code and interface have the same revision. After rebuilding, fully quit Discord from its system tray icon and reopen it; Ctrl+R leaves the previous native code running. A mismatch prevents capture and shows restart instructions.
-- Recordings stay armed until audio arrives; an empty capture does not save a zero-second WAV. Timeout errors in ReCord controls include the directory scanned and file/frame counts, without Electron's remote-call wrapper.
-- Diagnostic files can contain microphone input even if microphone inclusion is off. ReCord only exports processed microphone output and applies Discord's mute/deafen state to it; that behavior still needs a live test.
-- The 30-second replay buffer lives in memory. Discord also writes temporary diagnostic files to disk. ReCord removes consumed files it observed being created, retries locked-file cleanup, and stops capture if observed temporary data exceeds 128 MiB. Pre-existing files are preserved and ignored. Discord's diagnostic capture must be off before starting ReCord; avoid running another AEC-dump plugin alongside it.
-- WAV is uncompressed. Long recordings split into numbered parts at 256 MiB. Headers update during recording so completed audio is usually playable after an unexpected exit; power-loss durability is not guaranteed. Hard crashes can leave diagnostic files or state behind.
-- Audio is the mixed playout stream, with optional local mic, rather than separate speaker tracks. Soundboards and screenshare audio need verification. The shortcut works while Discord is focused; global shortcuts and compressed export are future work.
+- The 30-second replay buffer and capture stream stay in memory. ReCord does not create temporary audio files. Windows may page process memory to disk according to its system settings. If Discord diagnostic recording is already active, ReCord pauses capture and offers a control to stop it because diagnostics can write audio to disk.
+- Starting a full recording writes audio to a WAV file as it arrives. Saving a clip writes the buffered audio to a WAV file.
+- Capture includes audio played by the Discord process and its children, which may include notification sounds and shared-stream audio. It does not capture audio from unrelated applications.
+- The microphone input is captured separately from Discord's processed voice stream. If the selected microphone changes, capture stops and resumes on the next voice join.
+- Process-specific loopback requires Windows 10 build 20348 or later. Discord or Windows updates may affect capture.
+- WAV is uncompressed. Long recordings split into numbered parts at 256 MiB. Headers update during recording so completed audio is usually playable after an unexpected exit; power-loss durability is not guaranteed.
+- The shortcut works while Discord is focused. Separate speaker tracks, global shortcuts, and compressed export are not supported.
 
 See the [testing guide](docs/TESTING.md) and [capture internals](docs/RESEARCH.md). Licensed under [GPL-3.0-or-later](LICENSE).

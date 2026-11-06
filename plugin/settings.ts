@@ -10,7 +10,7 @@ import { OptionType } from "@utils/types";
 export const settings = definePluginSettings({
     includeMic: {
         type: OptionType.BOOLEAN,
-        description: "Include processed microphone audio while unmuted. Applies next time buffering starts.",
+        description: "Include your selected microphone while unmuted. Discord's voice processing is not applied. Applies on the next voice join.",
         default: false
     }
 });

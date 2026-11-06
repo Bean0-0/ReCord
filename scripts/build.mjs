@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const checkout = resolve(process.argv[2] ?? join(root, ".dev", "vencord"));
 for (const [args, cwd] of [
+    [[join(root, "scripts", "build-capture.mjs"), checkout], root],
     [[join(root, "scripts", "install-plugin.mjs"), checkout], root],
     [["node_modules/typescript/bin/tsc", "--noEmit"], checkout],
     [["node_modules/eslint/bin/eslint.js", "src/userplugins/reCord.discordDesktop"], checkout],

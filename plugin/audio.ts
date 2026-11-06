@@ -52,7 +52,7 @@ export class TimelineMixer {
     private next: number | undefined;
     private latest = 0;
 
-    constructor(private readonly startedAt: number, private readonly includeMic: boolean, micAllowed: boolean) {
+    constructor(private readonly startedAt: number, private readonly includeMic: boolean, micAllowed: boolean, private readonly lagFrames = 20) {
         this.micPolicy = [{ time: startedAt, allowed: micAllowed }];
     }
 
@@ -73,10 +73,20 @@ export class TimelineMixer {
         if (this.pending.size > 1000) throw new Error("Audio backlog exceeded its limit");
     }
 
+    fillSilence(time: number) {
+        const key = Math.floor(time / 10);
+        if (time < this.startedAt || (this.next !== undefined && key < this.next)) return;
+        const entry = this.pending.get(key) ?? {};
+        entry.playout ??= Buffer.alloc(FRAME_BYTES);
+        this.pending.set(key, entry);
+        this.latest = Math.max(this.latest, time);
+        if (this.pending.size > 1000) throw new Error("Audio backlog exceeded its limit");
+    }
+
     drain(final = false) {
         if (!this.pending.size) return Buffer.alloc(0);
         const keys = Array.from(this.pending.keys());
-        const last = Math.max(...keys) - (final ? 0 : 20);
+        const last = Math.max(...keys) - (final ? 0 : this.lagFrames);
         this.next ??= Math.min(...keys);
         if (last < this.next) return Buffer.alloc(0);
         if (last - this.next > 1000) throw new Error("Audio timeline exceeded its limit");

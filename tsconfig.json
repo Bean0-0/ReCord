@@ -8,5 +8,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["plugin/audio.ts", "plugin/dump.ts", "plugin/capture.ts", "plugin/recording.ts", "tests/**/*.ts"]
+  "include": ["plugin/audio.ts", "plugin/loopback.ts", "plugin/capture.ts", "plugin/recording.ts", "tests/**/*.ts"]
 }

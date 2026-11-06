@@ -5,7 +5,7 @@
  */
 
 // Bump when renderer/native changes require a full process restart.
-export const CAPTURE_REVISION = "2026-11-06.3";
+export const CAPTURE_REVISION = "2026-11-06.4";
 
 export async function checkNativeVersion(native: { getCaptureRevision?: () => Promise<string>; }) {
     if (typeof native.getCaptureRevision !== "function" || await native.getCaptureRevision() !== CAPTURE_REVISION)

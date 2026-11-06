@@ -5,7 +5,7 @@
  */
 
 // This method is called by RTC's ready/SFU callbacks and its return value is unused.
-// Prepare the native file baseline before Discord can create its first dump file.
+// Start the in-memory capture stream before Discord creates the voice stream.
 export const voiceJoinPatch = {
     find: '"media_engine_connect"',
     replacement: {
