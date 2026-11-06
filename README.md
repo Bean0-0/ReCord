@@ -7,7 +7,7 @@ An experimental Vencord userplugin for **official Discord desktop on Windows**:
 - Save stereo 48 kHz WAV files locally in your system's Videos/ReCord folder.
 - Optionally include processed microphone audio while unmuted.
 
-The audio pipeline has automated tests and builds against Vencord. **Live capture is still unverified. The current build prepares buffering before Discord creates the voice stream on join; the forced-reconnect workaround has been removed. This startup hook needs a live retest.** Browser Discord and Vesktop are not supported by this backend.
+The audio pipeline has automated tests and builds against Vencord. **The user has confirmed live capture works with automatic buffering on join.** ReCord prepares capture before Discord creates the voice stream, without forcing a reconnect. Additional device, mute-state, and long-session checks remain in the testing checklist. Browser Discord and Vesktop are not supported by this backend.
 
 ## Build and install
 
