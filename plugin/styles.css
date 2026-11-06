@@ -1,0 +1,25 @@
+.record-controls {
+    display: grid;
+    gap: 12px;
+    padding: 12px 0;
+}
+
+.record-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.record-error {
+    color: var(--text-danger);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.record-recording {
+    color: var(--status-danger);
+}
+
+.record-buffering {
+    color: var(--status-positive);
+}

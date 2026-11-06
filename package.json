@@ -1,0 +1,20 @@
+{
+  "name": "record-vencord-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "install-plugin": "node scripts/install-plugin.mjs",
+    "setup:vencord": "node scripts/setup-vencord.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.3"
+  }
+}

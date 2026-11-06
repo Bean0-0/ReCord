@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["plugin/audio.ts", "plugin/dump.ts", "plugin/capture.ts", "plugin/recording.ts", "tests/**/*.ts"]
+}
