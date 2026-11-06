@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { CaptureSession } from "../plugin/capture";
 import { prepareVoiceJoin, voiceJoinPatch } from "../plugin/connection";
-import { type AudioPacket, type AudioSource } from "../plugin/loopback";
-import { pcmFrames } from "./fixtures";
+import { frames, init } from "./fixtures";
 
 interface TestRtc {
     context: string;
@@ -27,35 +27,36 @@ function patchedRtc(bridge: { shouldPrepareCapture: (rtc: TestRtc) => boolean; b
     return rtc;
 }
 
-test("join starts the in-memory source before the voice stream; recording reuses it", async t => {
+test("join prepares the file baseline before the voice stream opens its dump; recording reuses that buffer", async t => {
     const root = await mkdtemp(join(tmpdir(), "record-join-"));
     t.after(() => rm(root, { recursive: true, force: true }));
-    const now = Math.ceil(Date.now() / 10) * 10;
-    let receive: ((packet: AudioPacket) => void) | undefined;
-    let active = false;
-    const source: AudioSource = {
-        async start(onPacket) { receive = onPacket; active = true; },
-        async stop() { active = false; }
-    };
-    const capture = new CaptureSession(source, join(root, "output"), false, false, now);
+    const dumps = join(root, "dumps");
+    await mkdir(dumps);
+    const now = Math.floor(Date.now() / 10) * 10;
+    const capture = new CaptureSession(dumps, join(root, "output"), false, false, now);
+    let dumpEnabled = false;
     let streamStarts = 0;
     const errors: unknown[] = [];
     const rtc = patchedRtc({
         shouldPrepareCapture: () => true,
-        beforeVoiceConnect: () => prepareVoiceJoin(() => capture.prepare(), error => errors.push(error))
+        beforeVoiceConnect: () => prepareVoiceJoin(async () => {
+            await capture.prepare();
+            dumpEnabled = true;
+        }, error => errors.push(error))
     });
     rtc.createStream = () => {
         streamStarts++;
-        assert.equal(active, true);
-        receive?.({ kind: "playout", time: now, pcm: pcmFrames(100, 1000) });
+        assert.equal(dumpEnabled, true, "the flag must be on before stream creation");
+        writeFileSync(join(dumps, "aecdump0"), Buffer.concat([init(now), frames(100, 1000)]));
     };
     await rtc._connectMediaEngineWithEndpoint({}, { socket: rtc._socket });
-    await capture.poll(now + 1000);
+    await capture.poll();
     assert.ok(capture.status.bufferedSeconds > 0);
+    assert.equal(capture.status.diagnostics.baselineFiles, 0);
     assert.equal(errors.length, 0);
     await capture.startRecording();
-    receive?.({ kind: "playout", time: now + 1000, pcm: pcmFrames(100, 2000) });
-    await capture.poll(now + 2000);
+    await appendFile(join(dumps, "aecdump0"), frames(100, 2000));
+    await capture.poll();
     assert.ok((await capture.saveClip()).seconds > 1);
     assert.equal((await capture.stopRecording()).seconds, 1);
     assert.equal(streamStarts, 1, "recording and clips must not recreate the voice stream");

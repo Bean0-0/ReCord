@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, unlink } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,19 +24,5 @@ if (info) {
     }
 }
 await mkdir(target, { recursive: true });
-// Remove only unchanged files from the retired diagnostic-dump implementation.
-for (const [name, hash] of [
-    ["dump.ts", "cc741ef554a19eed822e727e362eec436ea3cd65fce8269cec26ae8ea2bc8bbb"],
-    ["paths.ts", "9da2297480b8396e61d71de5c6ecc1dee331a3f2835f1b8d00497277777661be"]
-]) {
-    const oldPath = join(target, name);
-    try {
-        const info = await lstat(oldPath);
-        if (info.isFile() && !info.isSymbolicLink() && createHash("sha256").update(await readFile(oldPath)).digest("hex") === hash)
-            await unlink(oldPath);
-    } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-    }
-}
 await cp(source, target, { recursive: true });
 console.log(`Copied ReCord to ${target}\nRebuild Vencord and fully restart Discord to load native changes.`);

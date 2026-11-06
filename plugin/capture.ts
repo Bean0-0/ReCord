@@ -4,133 +4,142 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { BYTES_PER_SECOND, FRAME_BYTES, ReplayBuffer, TimelineMixer } from "./audio";
+import { lstat, open, readdir, unlink } from "node:fs/promises";
+import { join } from "node:path";
+
+import { ReplayBuffer, TimelineMixer } from "./audio";
+import { DumpDecoder } from "./dump";
 import { errorMessage } from "./errors";
-import { type AudioPacket, type AudioSource } from "./loopback";
 import { WavRecording } from "./recording";
 
-const MAX_QUEUED_BYTES = 4 * 1024 * 1024;
-const SILENCE_DELAY_MS = 500;
+const DUMP_NAME = /^aecdump\d+$/;
+const CAPTURE_NAME = /^capture\d+\.wav$/;
+const MAX_TEMP_BYTES = 128 * 1024 * 1024;
+const READ_BUDGET = 4 * 1024 * 1024;
 
-class FrameAssembler {
-    private pending = Buffer.alloc(0);
-    private nextTime: number | undefined;
-
-    push(packet: AudioPacket, onFrame: (time: number, pcm: Buffer) => void) {
-        const expected = (this.nextTime ?? packet.time) + this.pending.length / BYTES_PER_SECOND * 1000;
-        if (this.nextTime === undefined || Math.abs(packet.time - expected) > 80) {
-            this.pending = Buffer.alloc(0);
-            this.nextTime = Math.floor(packet.time / 10) * 10;
-        }
-        const data = Buffer.concat([this.pending, packet.pcm]);
-        let offset = 0;
-        while (offset + FRAME_BYTES <= data.length) {
-            const time: number = this.nextTime!;
-            this.nextTime = time + 10;
-            onFrame(time, data.subarray(offset, offset + FRAME_BYTES));
-            offset += FRAME_BYTES;
-        }
-        this.pending = Buffer.from(data.subarray(offset));
-    }
-}
+type Cursor = { decoder: DumpDecoder; offset: number; birthtimeMs: number; modified: number; };
 
 export class CaptureSession {
+    private readonly baseline = new Set<string>();
+    private readonly owned = new Map<string, number>();
+    private readonly cursors = new Map<string, Cursor>();
     private readonly replay = new ReplayBuffer();
     private readonly mixer: TimelineMixer;
-    private readonly assemblers = { playout: new FrameAssembler(), mic: new FrameAssembler() };
-    private packets: AudioPacket[] = [];
-    private queuedBytes = 0;
     private recording: WavRecording | undefined;
-    private failure: unknown;
+    private lastAudio = 0;
     private ended = false;
-    private started = false;
-    private nextSilence: number;
+    private failure: unknown;
+    private bytesRead = 0;
     private framesDecoded = 0;
-    private playoutFrames = 0;
-    private microphoneFrames = 0;
     private latestFrameTime: number | undefined;
     private readonly startedAt: number;
 
-    constructor(private readonly source: AudioSource, private readonly outputDirectory: string, includeMic: boolean, micAllowed: boolean, startedAt = Date.now()) {
-        this.startedAt = Math.ceil(startedAt / 10) * 10;
-        this.nextSilence = this.startedAt;
-        this.mixer = new TimelineMixer(this.startedAt, includeMic, micAllowed, 50);
+    constructor(private readonly dumpDirectory: string, private readonly outputDirectory: string, includeMic: boolean, micAllowed: boolean, startedAt = Date.now()) {
+        this.startedAt = startedAt;
+        this.mixer = new TimelineMixer(startedAt, includeMic, micAllowed);
     }
 
     get status() {
         return {
             bufferedSeconds: this.replay.seconds,
             recording: this.recording?.status ?? null,
-            receivingAudio: this.started && this.playoutFrames > 0 && !this.failure,
+            receivingAudio: !!this.lastAudio,
             outputDirectory: this.outputDirectory,
-            diagnostics: { queuedBytes: this.queuedBytes, framesDecoded: this.framesDecoded, playoutFrames: this.playoutFrames, microphoneFrames: this.microphoneFrames, latestFrameTime: this.latestFrameTime }
+            diagnostics: {
+                dumpDirectory: this.dumpDirectory,
+                baselineFiles: this.baseline.size,
+                dumpFiles: this.cursors.size,
+                bytesRead: this.bytesRead,
+                framesDecoded: this.framesDecoded,
+                latestFrameTime: this.latestFrameTime
+            }
         };
     }
 
+    get hasTemporaryFiles() { return this.owned.size > 0; }
+
     async prepare() {
-        await this.source.start(packet => {
-            if (this.ended || this.failure) return;
-            if (this.queuedBytes + packet.pcm.length > MAX_QUEUED_BYTES) {
-                this.failure = new Error("Audio capture fell behind; buffering stopped");
-                void this.source.stop().catch(console.error);
-                return;
-            }
-            this.packets.push(packet);
-            this.queuedBytes += packet.pcm.length;
-        }, error => { this.failure ??= error; });
-        this.started = true;
+        for (const name of await this.names()) this.baseline.add(name);
     }
 
     setMicAllowed(time: number, allowed: boolean) {
         this.mixer.setMicAllowed(time, allowed);
     }
 
+    private async names() {
+        try {
+            return (await readdir(this.dumpDirectory)).filter(name => DUMP_NAME.test(name) || CAPTURE_NAME.test(name));
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+            throw error;
+        }
+    }
+
     async poll(now = Date.now()) {
         if (this.ended) throw new Error("Capture has ended");
         if (this.failure) throw this.failure;
         try {
-            const { packets } = this;
-            this.packets = [];
-            this.queuedBytes = 0;
-            const frames: { time: number; kind: AudioPacket["kind"]; pcm: Buffer; }[] = [];
-            for (const packet of packets) {
-                if (Math.abs(packet.time - now) > 120_000) throw new Error("Unsupported audio timestamp; capture stopped");
-                this.assemblers[packet.kind].push(packet, (time, pcm) => frames.push({ time, kind: packet.kind, pcm }));
-            }
-            frames.sort((a, b) => a.time - b.time);
-            let count = 0;
-            for (const frame of frames) {
-                await this.padSilence(Math.min(frame.time - SILENCE_DELAY_MS, now - SILENCE_DELAY_MS));
-                this.mixer.add(frame.time, frame.kind, frame.pcm);
-                this.framesDecoded++;
-                if (frame.kind === "playout") this.playoutFrames++;
-                else this.microphoneFrames++;
-                this.latestFrameTime = frame.time;
-                if (++count === 200) {
-                    await this.consume(this.mixer.drain());
-                    count = 0;
-                }
-            }
-            await this.padSilence(now - SILENCE_DELAY_MS);
-            await this.consume(this.mixer.drain());
-            return this.status;
+            return await this.readPoll(now);
         } catch (error) {
             this.failure = error;
             throw error;
         }
     }
 
-    private async padSilence(until: number) {
-        if (until - this.nextSilence > 30_000) throw new Error("Audio timeline jumped; capture stopped");
-        let count = 0;
-        while (this.nextSilence <= until) {
-            this.mixer.fillSilence(this.nextSilence);
-            this.nextSilence += 10;
-            if (++count === 500) {
-                await this.consume(this.mixer.drain());
-                count = 0;
+    private async readPoll(now: number) {
+        const files: { name: string; size: number; birthtimeMs: number; modified: number; }[] = [];
+        let totalBytes = 0;
+        for (const name of await this.names()) {
+            if (this.baseline.has(name)) continue;
+            const info = await lstat(join(this.dumpDirectory, name));
+            if (!info.isFile() || info.isSymbolicLink()) continue;
+            const birthtime = this.owned.get(name);
+            if (birthtime !== undefined && birthtime !== info.birthtimeMs) throw new Error("Diagnostic file was replaced; capture stopped");
+            this.owned.set(name, info.birthtimeMs);
+            totalBytes += info.size;
+            if (DUMP_NAME.test(name)) files.push({ name, size: info.size, birthtimeMs: info.birthtimeMs, modified: info.mtimeMs });
+        }
+        if (totalBytes > MAX_TEMP_BYTES) throw new Error("Temporary audio exceeded 128 MiB; capture stopped");
+        files.sort((a, b) => a.birthtimeMs - b.birthtimeMs || Number(a.name.slice(7)) - Number(b.name.slice(7)));
+        let budget = READ_BUDGET;
+        for (const entry of files) {
+            if (!budget) break;
+            const cursor = this.cursors.get(entry.name) ?? { decoder: new DumpDecoder(), offset: 0, birthtimeMs: entry.birthtimeMs, modified: entry.modified };
+            this.cursors.set(entry.name, cursor);
+            if (entry.size < cursor.offset) throw new Error("Diagnostic file was truncated; capture stopped");
+            const file = await open(join(this.dumpDirectory, entry.name), "r");
+            try {
+                while (cursor.offset < entry.size && budget > 0) {
+                    const buffer = Buffer.alloc(Math.min(64 * 1024, entry.size - cursor.offset, budget));
+                    const { bytesRead } = await file.read(buffer, 0, buffer.length, cursor.offset);
+                    if (!bytesRead) break;
+                    cursor.offset += bytesRead;
+                    this.bytesRead += bytesRead;
+                    budget -= bytesRead;
+                    cursor.decoder.push(buffer.subarray(0, bytesRead), frame => {
+                        this.framesDecoded++;
+                        this.latestFrameTime = frame.time;
+                        if (Math.abs(frame.time - now) > 120_000) throw new Error("Unsupported diagnostic timestamp; capture stopped");
+                        if (frame.time >= this.startedAt) {
+                            this.lastAudio = now;
+                            this.mixer.add(frame.time, frame.kind, frame.pcm);
+                        }
+                    });
+                    await this.consume(this.mixer.drain());
+                }
+            } finally {
+                await file.close();
+            }
+            // Keep the current writer's file. Remove only consumed, inactive files we observed being created.
+            if (entry !== files[files.length - 1] && cursor.offset === entry.size && now - entry.modified > 2000) {
+                await this.removeOwned(entry.name);
+                await this.removeOwned(`capture${entry.name.slice(7)}.wav`);
+                this.cursors.delete(entry.name);
             }
         }
+        if (now - (this.lastAudio || this.startedAt) > 10_000)
+            throw new Error(`No call audio received for 10 seconds. Capture stopped.\nDirectory: ${this.dumpDirectory}\nDump files: ${this.cursors.size}; pre-existing files ignored: ${this.baseline.size}; bytes read: ${this.bytesRead}; decoded frames: ${this.framesDecoded}; latest timestamp: ${this.latestFrameTime ?? "none"}.`);
+        return this.status;
     }
 
     private async consume(pcm: Buffer) {
@@ -154,6 +163,7 @@ export class CaptureSession {
 
     async startRecording() {
         if (this.recording) throw new Error("Already recording");
+        // The replay buffer remains independent; recording begins at the current capture position.
         await this.consume(this.mixer.drain(true));
         const writer = new WavRecording(this.outputDirectory);
         await writer.start();
@@ -174,21 +184,48 @@ export class CaptureSession {
         if (this.ended) return;
         let recording: WavRecording["status"] | undefined;
         try {
-            await this.source.stop();
             await this.readFinalAudio();
             await this.consume(this.mixer.drain(true));
         } finally {
             this.ended = true;
             const { recording: writer } = this;
             this.recording = undefined;
-            recording = await writer?.close();
+            try {
+                recording = await writer?.close();
+            } finally {
+                await this.cleanup();
+            }
         }
         return { recording: recording ?? null, captureError: this.failure ? errorMessage(this.failure) : null };
     }
 
     private async readFinalAudio() {
         if (this.failure) return;
-        try { await this.poll(); }
-        catch { /* poll() retains the capture error; finalize known-good audio. */ }
+        try {
+            await this.poll();
+        } catch {
+            // poll() retains the capture error; closing must still finalize known-good audio.
+        }
+    }
+
+    async cleanup() {
+        for (const name of this.owned.keys()) await this.removeOwned(name);
+    }
+
+    private async removeOwned(name: string) {
+        const birthtime = this.owned.get(name);
+        if (birthtime === undefined) return;
+        try {
+            const path = join(this.dumpDirectory, name);
+            const info = await lstat(path);
+            if (info.isFile() && !info.isSymbolicLink() && info.birthtimeMs === birthtime) {
+                await unlink(path);
+                this.owned.delete(name);
+            }
+        } catch (error) {
+            const { code } = error as NodeJS.ErrnoException;
+            if (code === "ENOENT") this.owned.delete(name);
+            else if (code !== "EBUSY" && code !== "EPERM") throw error;
+        }
     }
 }
