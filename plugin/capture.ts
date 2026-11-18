@@ -58,8 +58,12 @@ export class CaptureSession {
 
     get hasTemporaryFiles() { return this.owned.size > 0; }
 
+    // Discord may create the new stream's dump before this runs, so only files born before the session are pre-existing.
     async prepare() {
-        for (const name of await this.names()) this.baseline.add(name);
+        for (const name of await this.names()) {
+            const info = await lstat(join(this.dumpDirectory, name)).catch(() => undefined);
+            if (!info || info.birthtimeMs < this.startedAt) this.baseline.add(name);
+        }
     }
 
     setMicAllowed(time: number, allowed: boolean) {

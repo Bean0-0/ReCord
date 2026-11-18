@@ -14,7 +14,7 @@ import definePlugin, { IconComponent, PluginNative } from "@utils/types";
 import { FluxDispatcher, MediaEngineStore, Modal, openModal, RTCConnectionStore, showToast, useEffect, useState } from "@webpack/common";
 
 import { CAPTURE_REVISION, checkNativeVersion } from "./compatibility";
-import { CaptureConnection, prepareVoiceJoin, voiceJoinPatch } from "./connection";
+import { CaptureConnection, voiceJoinPatch } from "./connection";
 import { errorMessage } from "./errors";
 import { settings } from "./settings";
 
@@ -33,6 +33,7 @@ let operation = Promise.resolve();
 let status: Status | undefined;
 let errorText = "";
 let waitingLogged = false;
+let joins = 0;
 let pausedCall: { rtc: VoiceConnection; channelId?: string; } | undefined;
 const listeners = new Set<() => void>();
 
@@ -70,10 +71,10 @@ function disableDump() {
     }
 }
 
-async function endCapture() {
+async function endCapture(keepDump = false) {
     clearInterval(timer);
     timer = undefined;
-    disableDump();
+    if (!keepDump) disableDump();
     const id = token;
     token = undefined;
     captureConnection = undefined;
@@ -90,41 +91,54 @@ function shouldPrepareCapture(rtc: VoiceConnection) {
         && !(pausedCall?.rtc === rtc && pausedCall.channelId === rtc.channelId);
 }
 
-function beforeVoiceConnect(rtc: VoiceConnection) {
-    return prepareVoiceJoin(signal => enqueue(async () => {
-        if (signal.aborted || !shouldPrepareCapture(rtc) || RTCConnectionStore.getRTCConnection() !== rtc) return;
-        const wasRecording = !!status?.recording;
-        const result = await endCapture();
-        if (wasRecording) notify(result?.recording?.seconds ? "Voice session changed. Recording saved." : "Voice session changed. No audio was received; no recording was saved.");
-        if (signal.aborted || !shouldPrepareCapture(rtc) || RTCConnectionStore.getRTCConnection() !== rtc) return;
-        await beginCapture(rtc, signal);
-    }), report);
+function isCurrent(rtc: VoiceConnection, channelId: string) {
+    return shouldPrepareCapture(rtc) && RTCConnectionStore.getRTCConnection() === rtc && RTCConnectionStore.getChannelId() === channelId;
 }
 
-async function beginCapture(rtc: VoiceConnection, signal: AbortSignal) {
-    if (!enabled) throw new Error("Plugin is disabled");
-    if (token) return;
+// Runs inside Discord's stream setup and must not await: the dump flag has to be on before the stream
+// is created, and delaying the stream breaks DAVE (see connection.ts). Native setup follows asynchronously.
+function beforeVoiceConnect(rtc: VoiceConnection) {
+    try {
+        const { channelId } = rtc;
+        if (!shouldPrepareCapture(rtc) || !channelId) return;
+        if (!ownsDump) {
+            if (!MediaEngineStore.isAecDumpSupported()) throw new Error("Discord's active voice engine does not support diagnostic audio capture. ReCord cannot record with this voice backend.");
+            if (MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics are already enabled. Stop the existing diagnostic capture first.");
+            if (typeof MediaEngineStore.getMediaEngine()?.setAecDump !== "function") throw new Error("This Discord client does not support native audio capture");
+            FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: true });
+            ownsDump = true;
+        }
+        const startedAt = Date.now();
+        const generation = ++joins;
+        const wasRecording = !!status?.recording;
+        const ending = endCapture(true);
+        ending.catch(() => { }); // Awaited and reported in the queued task below.
+        void enqueue(async () => {
+            const result = await ending;
+            if (wasRecording) notify(result?.recording?.seconds ? "Voice session changed. Recording saved." : "Voice session changed. No audio was received; no recording was saved.");
+            if (generation !== joins) return; // A newer join owns the dump flag now.
+            if (!isCurrent(rtc, channelId)) return disableDump();
+            await beginCapture(rtc, channelId, startedAt);
+        }).catch(error => {
+            if (!token && generation === joins) disableDump();
+            report(error);
+        });
+    } catch (error) {
+        queueMicrotask(() => report(error)); // Never throw into Discord's stream setup.
+    }
+}
+
+async function beginCapture(rtc: VoiceConnection, channelId: string, startedAt: number) {
     await checkNativeVersion(Native);
-    if (signal.aborted) return;
-    if (!MediaEngineStore.isAecDumpSupported()) throw new Error("Discord's active voice engine does not support diagnostic audio capture. ReCord cannot record with this voice backend.");
-    if (MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics are already enabled. Stop the existing diagnostic capture first.");
-    if (typeof MediaEngineStore.getMediaEngine()?.setAecDump !== "function") throw new Error("This Discord client does not support native audio capture");
-    const currentChannel = rtc.channelId;
-    if (!currentChannel || RTCConnectionStore.getRTCConnection() !== rtc) return;
-    const id = await Native.startCapture(settings.store.includeMic, micAllowed());
-    console.info("[ReCord] Preparing buffer before voice stream", JSON.stringify({ revision: CAPTURE_REVISION, aecSupported: MediaEngineStore.isAecDumpSupported(), audioSubsystem: MediaEngineStore.getAudioSubsystem() }));
+    if (!isCurrent(rtc, channelId)) return disableDump();
+    if (!MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics were turned off");
+    const id = await Native.startCapture(settings.store.includeMic, micAllowed(), startedAt);
+    console.info("[ReCord] Buffering voice stream", JSON.stringify({ revision: CAPTURE_REVISION, audioSubsystem: MediaEngineStore.getAudioSubsystem() }));
     token = id;
     try {
-        if (signal.aborted || !shouldPrepareCapture(rtc) || RTCConnectionStore.getRTCConnection() !== rtc || RTCConnectionStore.getChannelId() !== currentChannel)
-            throw new Error("Voice connection changed while preparing capture");
-        captureConnection = new CaptureConnection(currentChannel);
-        ownsDump = true;
-        FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: true });
+        if (!isCurrent(rtc, channelId)) throw new Error("Voice connection changed while preparing capture");
+        captureConnection = new CaptureConnection(channelId);
         status = await Native.poll(id);
-        if (signal.aborted) {
-            await endCapture();
-            return;
-        }
         waitingLogged = false;
         timer = setInterval(pollCapture, 250);
         errorText = "";
@@ -138,17 +152,21 @@ async function beginCapture(rtc: VoiceConnection, signal: AbortSignal) {
 function pollCapture() {
     if (polling || busy || !token) return;
     polling = true;
+    const id = token;
     void enqueue(async () => {
-        if (!token) return;
+        if (token !== id) return;
         try {
             if (!MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics were turned off");
-            status = await Native.poll(token);
+            const next = await Native.poll(id);
+            if (token !== id) return;
+            status = next;
             if (!status.receivingAudio && !waitingLogged) {
                 console.info("[ReCord] Waiting for audio", JSON.stringify(status.diagnostics));
                 waitingLogged = true;
             }
             refresh();
         } catch (error) {
+            if (token !== id) return;
             await endCapture().catch(cleanupError => console.error("[ReCord] Cleanup failed", cleanupError));
             report(error);
         }
@@ -316,7 +334,6 @@ export default definePlugin({
     tags: ["Voice", "Utility"],
     settings,
     patches: [voiceJoinPatch],
-    shouldPrepareCapture,
     beforeVoiceConnect,
     chatBarButton: { icon: RecordIcon, render: CaptureButton },
     settingsAboutComponent: Controls,

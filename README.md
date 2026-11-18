@@ -46,7 +46,7 @@ The microphone setting applies when capture starts. Let participants know before
 
 ## Limits
 
-- While ReCord is enabled, each normal voice join automatically starts capture. Its startup hook prepares the file baseline and enables diagnostics before stream creation. Capture setup is limited to two seconds; a failure lets the call join normally and reports an error.
+- While ReCord is enabled, each normal voice join automatically starts capture. Its hook enables diagnostics synchronously before stream creation and starts the native session afterward; it never delays the voice connection. A setup failure lets the call continue and reports an error.
 - Capture uses Discord's internal WebRTC diagnostic dump format. Client updates may break it. If no readable audio arrives for 10 seconds, ReCord stops and reports an error.
 - ReCord checks that its recording code and interface have the same revision. After rebuilding, fully quit Discord from its system tray icon and reopen it; Ctrl+R leaves the previous native code running. A mismatch prevents capture and shows restart instructions.
 - Recordings stay armed until audio arrives; an empty capture does not save a zero-second WAV. Timeout errors in ReCord controls include the directory scanned and file/frame counts, without Electron's remote-call wrapper.

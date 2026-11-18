@@ -75,14 +75,15 @@ export function recover(event: IpcMainInvokeEvent) {
     });
 }
 
-export function startCapture(event: IpcMainInvokeEvent, includeMic: boolean, micAllowed: boolean) {
+export function startCapture(event: IpcMainInvokeEvent, includeMic: boolean, micAllowed: boolean, startedAt: number) {
     return serialize(async () => {
         if (session || owner !== undefined) throw new Error("Another ReCord capture session is active");
         await cleanupRetired();
         if (retired.size) throw new Error("Previous temporary audio files are still in use. Wait before starting capture again.");
-        if (typeof includeMic !== "boolean" || typeof micAllowed !== "boolean") throw new Error("Invalid capture options");
+        if (typeof includeMic !== "boolean" || typeof micAllowed !== "boolean" || !Number.isFinite(startedAt) || Math.abs(Date.now() - startedAt) > 5000)
+            throw new Error("Invalid capture options");
         const discordPaths = globalThis as typeof globalThis & { moduleDataPath?: string; modulePath?: string; };
-        const next = new CaptureSession(voiceDumpDirectory(app.getPath("userData"), discordPaths), outputDirectory(), includeMic, micAllowed);
+        const next = new CaptureSession(voiceDumpDirectory(app.getPath("userData"), discordPaths), outputDirectory(), includeMic, micAllowed, startedAt);
         await next.prepare();
         session = next;
         owner = event.sender.id;

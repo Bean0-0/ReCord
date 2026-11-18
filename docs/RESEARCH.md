@@ -6,7 +6,7 @@ ReCord is a Vencord userplugin for official Discord desktop. Its renderer integr
 
 Discord's native voice engine can write WebRTC echo-cancellation diagnostic dumps. ReCord enables this through the `MEDIA_ENGINE_SET_AEC_DUMP` action and reads the resulting files from Discord's `discord_voice` module data directory.
 
-In the inspected Discord 1.0.9267 voice module, enabling `setAecDump` sets a flag, and the dump writer starts when the voice stream is created. ReCord patches `_connectMediaEngineWithEndpoint` to prepare its file baseline and enable diagnostics before that stream is created. This allows buffering to start on a normal voice join. Setup has a two-second timeout; if it fails, the voice connection continues and ReCord reports the error. The patch and diagnostic format are internal Discord interfaces and may change with client updates.
+In the inspected Discord 1.0.9267 voice module, enabling `setAecDump` sets a flag, and the dump writer starts when the voice stream is created. ReCord patches `_connectMediaEngineWithEndpoint` to enable diagnostics synchronously before that stream is created, then starts its native session; dump files born before the session start are treated as pre-existing. The hook must not await: delaying stream creation lets voice gateway messages (client connects, DAVE/MLS) arrive before Discord's media connection exists, the MLS welcome is rejected, and the server disconnects the call with code 4803. The patch and diagnostic format are internal Discord interfaces and may change with client updates.
 
 ## Audio pipeline
 

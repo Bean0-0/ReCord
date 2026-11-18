@@ -53,6 +53,7 @@ test("capture tails partial records, clips while recording, and preserves pre-ex
     const { dumps, output } = await workspace(t);
     const old = join(dumps, "aecdump0");
     await writeFile(old, "unrelated diagnostic data");
+    await new Promise(resolve => setTimeout(resolve, 20)); // Baseline is files born before the session.
     const now = Math.floor(Date.now() / 10) * 10;
     const capture = new CaptureSession(dumps, output, false, true, now);
     await capture.prepare();
