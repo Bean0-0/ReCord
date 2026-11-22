@@ -23,3 +23,24 @@
 .record-buffering {
     color: var(--status-positive);
 }
+
+/* Mimics Discord's voice panel action buttons (camera, screen share, soundboard). */
+.record-panel-button {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: var(--background-mod-normal);
+    color: var(--interactive-normal);
+    cursor: pointer;
+}
+
+.record-panel-button:hover {
+    background: var(--background-mod-strong);
+    color: var(--interactive-hover);
+}
