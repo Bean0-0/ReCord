@@ -23,6 +23,6 @@ Capture has been confirmed in a live call. The scenarios below provide broader c
 4. Start a recording, save clips while recording, then stop it. Confirm recording starts and stops at the requested times, clip saves do not interrupt it, and buffering continues afterward.
 5. Record through a diagnostic file rotation and an output-device change. Check continuity and WAV playback, then inspect memory and temporary disk use during a longer call.
 6. Move channels, disconnect and reconnect, disable the plugin, and reload Discord. Confirm capture stops and active recordings are finalized. A new voice stream should start with an empty buffer. Check that newly created diagnostic files are removed once released and pre-existing files are preserved.
-7. Exercise the chat-bar button, settings controls, Toolbox actions, `/record`, `/clip`, and Ctrl+Shift+S. The shortcut should fire once per press while Discord is focused. Closing the controls should leave an active recording running with the red status icon visible.
+7. Exercise the voice panel record button, settings controls, Toolbox actions, `/record`, `/clip`, and Ctrl+Shift+S. The shortcut should fire once per press while Discord is focused. Closing the controls should leave an active recording running with the red status icon visible.
 
 For failures, record the Discord version, Vencord revision, audio subsystem, device layout, and exact error text. Diagnostic dumps can contain microphone audio and metadata.

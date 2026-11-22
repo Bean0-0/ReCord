@@ -6,12 +6,12 @@
 
 import "./styles.css";
 
-import { ChatBarButton } from "@api/ChatButtons";
 import { ApplicationCommandInputType } from "@api/Commands";
 import { Button } from "@components/Button";
+import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import definePlugin, { IconComponent, PluginNative } from "@utils/types";
-import { FluxDispatcher, MediaEngineStore, Modal, openModal, RTCConnectionStore, showToast, useEffect, useState } from "@webpack/common";
+import { FluxDispatcher, MediaEngineStore, Modal, openModal, RTCConnectionStore, showToast, Tooltip, useEffect, useState } from "@webpack/common";
 
 import { CAPTURE_REVISION, checkNativeVersion } from "./compatibility";
 import { CaptureConnection, voiceJoinPatch } from "./connection";
@@ -103,9 +103,10 @@ function beforeVoiceConnect(rtc: VoiceConnection) {
         if (!shouldPrepareCapture(rtc) || !channelId) return;
         if (!ownsDump) {
             if (!MediaEngineStore.isAecDumpSupported()) throw new Error("Discord's active voice engine does not support diagnostic audio capture. ReCord cannot record with this voice backend.");
-            if (MediaEngineStore.getAecDump()) throw new Error("Discord audio diagnostics are already enabled. Stop the existing diagnostic capture first.");
             if (typeof MediaEngineStore.getMediaEngine()?.setAecDump !== "function") throw new Error("This Discord client does not support native audio capture");
-            FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: true });
+            // ponytail: Discord persists this flag, so a crash or restart mid-call leaves it on with nobody owning it.
+            // Adopt it instead of refusing; ReCord turns it off when capture ends.
+            if (!MediaEngineStore.getAecDump()) FluxDispatcher.dispatch({ type: "MEDIA_ENGINE_SET_AEC_DUMP", enabled: true });
             ownsDump = true;
         }
         const startedAt = Date.now();
@@ -272,10 +273,15 @@ const RecordIcon: IconComponent = ({ width = 20, height = 20, className }) => (
 function CaptureButton() {
     useCaptureUpdates();
     const tooltip = status?.recording ? `ReCord: recording ${formatTime(status.recording.seconds)}` : token ? "ReCord: buffering call audio" : "Open ReCord controls";
+    const className = status?.recording ? "record-recording" : token ? "record-buffering" : undefined;
     return (
-        <ChatBarButton tooltip={tooltip} onClick={openControls}>
-            <RecordIcon className={status?.recording ? "record-recording" : token ? "record-buffering" : undefined} />
-        </ChatBarButton>
+        <Tooltip text={tooltip}>
+            {props => (
+                <button {...props} type="button" className="record-panel-button" aria-label={tooltip} onClick={openControls}>
+                    <RecordIcon className={className} />
+                </button>
+            )}
+        </Tooltip>
     );
 }
 
@@ -333,9 +339,19 @@ export default definePlugin({
     authors: [{ name: "Bean0-0", id: 0n }],
     tags: ["Voice", "Utility"],
     settings,
-    patches: [voiceJoinPatch],
+    patches: [
+        voiceJoinPatch,
+        {
+            // Voice panel action row (camera, screen share, activities, soundboard): append after soundboard.
+            find: '"SoundboardRTCPanelButton"',
+            replacement: {
+                match: /(\(0,\i\.jsx\)\(\i,\{channel:\i,focusProps:\i\}\):null)\]/,
+                replace: "$1,$self.CaptureButton()]"
+            }
+        }
+    ],
     beforeVoiceConnect,
-    chatBarButton: { icon: RecordIcon, render: CaptureButton },
+    CaptureButton: ErrorBoundary.wrap(CaptureButton, { noop: true }),
     settingsAboutComponent: Controls,
     toolboxActions: {
         "ReCord controls": openControls,

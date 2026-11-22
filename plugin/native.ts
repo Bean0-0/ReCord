@@ -51,9 +51,21 @@ async function cleanupRetired() {
     }
 }
 
-// If the renderer stops polling, finalize the WAV instead of leaving the writer open.
+// Read dumps here, not only on renderer polls: Chromium throttles a hidden/minimized Discord's timers to ~1/min.
+// A read failure stays on the session and surfaces on the renderer's next poll.
+let ingesting = false;
+const ingest = setInterval(() => {
+    if (!session || ingesting) return;
+    ingesting = true;
+    void serialize(async () => { await session?.poll(); }).catch(() => { }).finally(() => { ingesting = false; });
+}, 250);
+ingest.unref();
+
+// If the renderer stops polling (crashed or reloaded with ReCord off), finalize the WAV instead of leaving the writer open.
+// ponytail: throttled renderers still poll about once a minute, so allow a few minutes before treating it as gone.
+const RENDERER_TIMEOUT = 3 * 60_000;
 const watchdog = setInterval(() => {
-    if (session && Date.now() - lastPoll > 5000) void serialize(closeSession).catch(console.error);
+    if (session && Date.now() - lastPoll > RENDERER_TIMEOUT) void serialize(closeSession).catch(console.error);
     if (retired.size) void serialize(cleanupRetired).catch(console.error);
 }, 1000);
 watchdog.unref();

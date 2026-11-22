@@ -34,9 +34,9 @@ If you already maintain a Vencord source checkout, use `npm run install-plugin -
 
 ## Use
 
-Open ReCord through the chat-bar recording icon, Vencord Toolbox → ReCord controls, `/record`, or the plugin's settings.
+Open ReCord through the recording button in the voice panel (next to soundboard), Vencord Toolbox → ReCord controls, `/record`, or the plugin's settings.
 
-1. Enable ReCord before joining a voice call. Buffering starts automatically as Discord creates the voice stream; the chat-bar icon turns green. Open ReCord controls and confirm the buffered seconds increase. ReCord does not leave or rejoin the call. If you enable it during an existing call, buffering starts on your next normal join.
+1. Enable ReCord before joining a voice call. Buffering starts automatically as Discord creates the voice stream; the voice panel record button turns green. Open ReCord controls and confirm the buffered seconds increase. ReCord does not leave or rejoin the call. If you enable it during an existing call, buffering starts on your next normal join.
 2. Use **Clip last 30 seconds**, `/clip`, or **Ctrl+Shift+S** while Discord is focused. Early clips contain only the available audio. Capture has a short processing delay.
 3. Choose **Start recording** to record from that moment using the running capture session; the icon turns red and the controls show its duration. Starting recording does not restart the voice connection. **Stop and save recording** saves it while buffering continues. Clips also work during a recording.
 4. **Stop capture** saves an active recording and pauses buffering for the current call. On your next normal join, buffering starts again. Leaving or changing voice connections ends the previous session and saves an active recording. A new voice stream gets a new buffer.
